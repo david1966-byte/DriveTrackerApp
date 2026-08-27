@@ -1,193 +1,167 @@
-package com.example.parkinghelper
+package com.example.driveapp
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.example.parkinghelper.ui.theme.ParkingHelperTheme
-import java.util.Locale
 
-class TTSManager(context: android.content.Context) : TextToSpeech.OnInitListener {
-    private var tts: TextToSpeech? = TextToSpeech(context, this)
-    private var isReady = false
-
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale("he", "IL"))
-            if (result != TextToSpeech.LANG_MISSING_DATA && result != TextToSpeech.LANG_NOT_SUPPORTED) {
-                isReady = true
-            }
-        }
-    }
-
-    fun speak(text: String) {
-        if (isReady) {
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
-        }
-    }
-
-    fun shutdown() {
-        tts?.stop()
-        tts?.shutdown()
-    }
+enum class DriveState(val label: String, val speech: String) {
+    OFF("מעקב כבוי", "המעקב כבוי"),
+    DRIVING("בנסיעה", "מצב נסיעה הופעל"),
+    PARKED("בחנייה", "מצב חנייה הופעל")
 }
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var ttsManager: TTSManager
-    private var speechRecognizer: SpeechRecognizer? = null
-
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted: Boolean ->
-        if (isGranted) {
-            startVoiceRecognition()
-        } else {
-            ttsManager.speak("נדרשת הרשאת מיקרופון כדי להשתמש בזיהוי קולי")
-        }
-    }
+    private lateinit var ttsManager: TtsManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        ttsManager = TTSManager(this)
-
-        if (SpeechRecognizer.isRecognitionAvailable(this)) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-        }
+        ttsManager = TtsManager(this)
 
         setContent {
-            ParkingHelperTheme {
+            MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    ParkingScreen(
-                        onOpenPango = { openPangoApp() },
-                        onStartListening = { checkAndStartListening() }
+                    MainScreen(
+                        onStateChange = { newState ->
+                            ttsManager.speak(newState.speech)
+                            updateService(newState.label)
+                        },
+                        onOpenParkingLocation = {
+                            ttsManager.speak("פותח את מיקום החנייה האחרון")
+                            val gmmIntentUri = Uri.parse("google.navigation:q=0,0")
+                            val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri).apply {
+                                setPackage("com.google.android.apps.maps")
+                            }
+                            startActivity(mapIntent)
+                        },
+                        onOpenPango = {
+                            ttsManager.speak("פותח את אפליקציית פנגו")
+                            val pangoPackage = "com.unicell.pangoandroid"
+                            val pangoIntent = packageManager.getLaunchIntentForPackage(pangoPackage)
+                            if (pangoIntent != null) {
+                                startActivity(pangoIntent)
+                            } else {
+                                val marketIntent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$pangoPackage"))
+                                startActivity(marketIntent)
+                            }
+                        }
                     )
                 }
             }
         }
     }
 
-    private fun openPangoApp() {
-        ttsManager.speak("פותח את אפליקציית פנגו")
-        val pangoPackage = "com.unicell.pangoandroid"
-        val pangoIntent = packageManager.getLaunchIntentForPackage(pangoPackage)
-        
-        if (pangoIntent != null) {
-            startActivity(pangoIntent)
-        } else {
-            // אם האפליקציה אינה מותקנת במכשיר, מפנה לחנות App/Play Store
-            val marketIntent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$pangoPackage"))
-            startActivity(marketIntent)
+    private fun updateService(stateLabel: String) {
+        val intent = Intent(this, DriveService::class.java).apply {
+            putExtra(DriveService.EXTRA_STATE, stateLabel)
         }
-    }
-
-    private fun checkAndStartListening() {
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            startVoiceRecognition()
-        } else {
-            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        }
-    }
-
-    private fun startVoiceRecognition() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "he-IL")
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "דבר עכשיו...")
-        }
-
-        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
-            override fun onError(error: Int) {
-                ttsManager.speak("לא הצלחתי להבין, נסה שוב")
-            }
-
-            override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (!matches.isNullOrEmpty()) {
-                    val spokenText = matches[0].lowercase()
-                    if (spokenText.contains("פנגו") || spokenText.contains("חניה") || spokenText.contains("פתוח")) {
-                        openPangoApp()
-                    } else {
-                        ttsManager.speak("שמעתי: $spokenText. אמור פנגו כדי לפתוח את האפליקציה")
-                    }
-                }
-            }
-
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-
-        speechRecognizer?.startListening(intent)
+        ContextCompat.startForegroundService(this, intent)
     }
 
     override fun onDestroy() {
-        super.onDestroy()
-        speechRecognizer?.destroy()
         ttsManager.shutdown()
+        super.onDestroy()
     }
 }
 
 @Composable
-fun ParkingScreen(
-    onOpenPango: () -> Unit,
-    onStartListening: () -> Unit
+fun MainScreen(
+    onStateChange: (DriveState) -> Unit,
+    onOpenParkingLocation: () -> Unit,
+    onOpenPango: () -> Unit
 ) {
+    var currentState by remember { mutableStateOf(DriveState.OFF) }
+
+    val buttonColor = when (currentState) {
+        DriveState.OFF -> Color(0xFF757575)       // אפור
+        DriveState.DRIVING -> Color(0xFF4CAF50)   // ירוק
+        DriveState.PARKED -> Color(0xFF2196F3)    // כחול
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text(
-            text = "עוזר החנייה הקולי",
-            style = MaterialTheme.typography.headlineMedium
-        )
-        Spacer(modifier = Modifier.height(32.dp))
+        // כפתור מעקב ראשי
+        Button(
+            onClick = {
+                currentState = when (currentState) {
+                    DriveState.OFF -> DriveState.DRIVING
+                    DriveState.DRIVING -> DriveState.PARKED
+                    DriveState.PARKED -> DriveState.OFF
+                }
+                onStateChange(currentState)
+            },
+            colors = ButtonDefaults.buttonColors(containerColor = buttonColor),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(80.dp)
+        ) {
+            Text(
+                text = "מצב מעקב: ${currentState.label}",
+                fontSize = 20.sp,
+                color = Color.White
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // כפתור מקום חנייה אחרון
+        Button(
+            onClick = onOpenParkingLocation,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(60.dp)
+        ) {
+            Text(text = "פתח מקום חנייה אחרון", fontSize = 16.sp)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // כפתור פתיחת פנגו
         Button(
             onClick = onOpenPango,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9800)),
+            shape = RoundedCornerShape(12.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(56.dp)
+                .height(60.dp)
         ) {
-            Text(text = "פתח פנגו")
-        }
-        Spacer(modifier = Modifier.height(16.dp))
-        Button(
-            onClick = onStartListening,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-        ) {
-            Text(text = "הפעל פקודה קולית 🎙️")
+            Text(text = "פתח אפליקציית Pango", fontSize = 16.sp, color = Color.White)
         }
     }
 }
