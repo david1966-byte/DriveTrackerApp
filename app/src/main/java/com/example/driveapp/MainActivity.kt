@@ -1,10 +1,18 @@
 package com.example.driveapp
 
+import android.Manifest
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -39,10 +47,32 @@ enum class DriveState(val label: String, val speech: String) {
 class MainActivity : ComponentActivity() {
 
     private lateinit var ttsManager: TtsManager
+    private var currentStateState = mutableStateOf(DriveState.OFF)
+
+    // מקלט זיהוי התחברות והתנתקות Bluetooth של הרכב
+    private val bluetoothReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                    updateState(DriveState.DRIVING)
+                }
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
+                    updateState(DriveState.PARKED)
+                }
+            }
+        }
+    }
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ttsManager = TtsManager(this)
+
+        checkBluetoothPermissions()
+        registerBluetoothReceiver()
 
         setContent {
             MaterialTheme {
@@ -51,9 +81,9 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     MainScreen(
+                        currentState = currentStateState.value,
                         onStateChange = { newState ->
-                            ttsManager.speak(newState.speech)
-                            updateService(newState.label)
+                            updateState(newState)
                         },
                         onOpenParkingLocation = {
                             ttsManager.speak("פותח את מיקום החנייה האחרון")
@@ -80,6 +110,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun updateState(newState: DriveState) {
+        currentStateState.value = newState
+        ttsManager.speak(newState.speech)
+        updateService(newState.label)
+    }
+
     private fun updateService(stateLabel: String) {
         val intent = Intent(this, DriveService::class.java).apply {
             putExtra(DriveService.EXTRA_STATE, stateLabel)
@@ -87,7 +123,26 @@ class MainActivity : ComponentActivity() {
         ContextCompat.startForegroundService(this, intent)
     }
 
+    private fun checkBluetoothPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+        }
+    }
+
+    private fun registerBluetoothReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        registerReceiver(bluetoothReceiver, filter)
+    }
+
     override fun onDestroy() {
+        try {
+            unregisterReceiver(bluetoothReceiver)
+        } catch (_: Exception) {}
         ttsManager.shutdown()
         super.onDestroy()
     }
@@ -95,12 +150,11 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun MainScreen(
+    currentState: DriveState,
     onStateChange: (DriveState) -> Unit,
     onOpenParkingLocation: () -> Unit,
     onOpenPango: () -> Unit
 ) {
-    var currentState by remember { mutableStateOf(DriveState.OFF) }
-
     val buttonColor = when (currentState) {
         DriveState.OFF -> Color(0xFF757575)       // אפור
         DriveState.DRIVING -> Color(0xFF4CAF50)   // ירוק
@@ -114,15 +168,15 @@ fun MainScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        // כפתור מעקב ראשי
+        // כפתור מעקב ראשי (מאפשר גם שינוי ידני)
         Button(
             onClick = {
-                currentState = when (currentState) {
+                val nextState = when (currentState) {
                     DriveState.OFF -> DriveState.DRIVING
                     DriveState.DRIVING -> DriveState.PARKED
                     DriveState.PARKED -> DriveState.OFF
                 }
-                onStateChange(currentState)
+                onStateChange(nextState)
             },
             colors = ButtonDefaults.buttonColors(containerColor = buttonColor),
             shape = RoundedCornerShape(16.dp),
