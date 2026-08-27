@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -41,7 +42,7 @@ import androidx.core.content.ContextCompat
 enum class DriveState(val label: String, val speech: String) {
     OFF("מעקב כבוי", "המעקב כבוי"),
     DRIVING("בנסיעה", "מצב נסיעה הופעל"),
-    PARKED("בחנייה", "מצב חנייה הופעל")
+    PARKED("בחנייה", "מצב חנייה הופעל ושמור")
 }
 
 class MainActivity : ComponentActivity() {
@@ -49,7 +50,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var ttsManager: TtsManager
     private var currentStateState = mutableStateOf(DriveState.OFF)
 
-    // מקלט זיהוי התחברות והתנתקות Bluetooth של הרכב
+    // מקלט Bluetooth המזהה חיבור וניתוק מהרכב
     private val bluetoothReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -64,14 +65,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private val permissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
+        ActivityResultContracts.RequestMultiplePermissions()
     ) { _ -> }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ttsManager = TtsManager(this)
 
-        checkBluetoothPermissions()
+        requestRequiredPermissions()
         registerBluetoothReceiver()
 
         setContent {
@@ -85,25 +86,8 @@ class MainActivity : ComponentActivity() {
                         onStateChange = { newState ->
                             updateState(newState)
                         },
-                        onOpenParkingLocation = {
-                            ttsManager.speak("פותח את מיקום החנייה האחרון")
-                            val gmmIntentUri = Uri.parse("google.navigation:q=0,0")
-                            val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri).apply {
-                                setPackage("com.google.android.apps.maps")
-                            }
-                            startActivity(mapIntent)
-                        },
-                        onOpenPango = {
-                            ttsManager.speak("פותח את אפליקציית פנגו")
-                            val pangoPackage = "com.unicell.pangoandroid"
-                            val pangoIntent = packageManager.getLaunchIntentForPackage(pangoPackage)
-                            if (pangoIntent != null) {
-                                startActivity(pangoIntent)
-                            } else {
-                                val marketIntent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$pangoPackage"))
-                                startActivity(marketIntent)
-                            }
-                        }
+                        onOpenParkingLocation = { openSavedParkingLocation() },
+                        onOpenPango = { openPangoApp() }
                     )
                 }
             }
@@ -112,8 +96,61 @@ class MainActivity : ComponentActivity() {
 
     private fun updateState(newState: DriveState) {
         currentStateState.value = newState
+        
+        // אם עברנו למצב חנייה - שומרים מיקום GPS אוטומטית
+        if (newState == DriveState.PARKED) {
+            saveParkingLocation()
+        }
+
         ttsManager.speak(newState.speech)
         updateService(newState.label)
+    }
+
+    private fun saveParkingLocation() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            
+            val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val location = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                ?: locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+
+            if (location != null) {
+                val prefs = getSharedPreferences("DriveAppPrefs", Context.MODE_PRIVATE)
+                prefs.edit()
+                    .putFloat("parking_lat", location.latitude.toFloat())
+                    .putFloat("parking_lng", location.longitude.toFloat())
+                    .apply()
+            }
+        }
+    }
+
+    private fun openSavedParkingLocation() {
+        val prefs = getSharedPreferences("DriveAppPrefs", Context.MODE_PRIVATE)
+        val lat = prefs.getFloat("parking_lat", 0f)
+        val lng = prefs.getFloat("parking_lng", 0f)
+
+        if (lat != 0f && lng != 0f) {
+            ttsManager.speak("פותח את מיקום החנייה השמור")
+            val uri = Uri.parse("geo:$lat,$lng?q=$lat,$lng(מיקום חנייה)")
+            val mapIntent = Intent(Intent.ACTION_VIEW, uri).apply {
+                setPackage("com.google.android.apps.maps")
+            }
+            startActivity(mapIntent)
+        } else {
+            ttsManager.speak("טרם נשמר מיקום חנייה")
+        }
+    }
+
+    private fun openPangoApp() {
+        ttsManager.speak("פותח את אפליקציית פנגו")
+        val pangoPackage = "com.unicell.pangoandroid"
+        val pangoIntent = packageManager.getLaunchIntentForPackage(pangoPackage)
+        if (pangoIntent != null) {
+            startActivity(pangoIntent)
+        } else {
+            val marketIntent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$pangoPackage"))
+            startActivity(marketIntent)
+        }
     }
 
     private fun updateService(stateLabel: String) {
@@ -123,12 +160,18 @@ class MainActivity : ComponentActivity() {
         ContextCompat.startForegroundService(this, intent)
     }
 
-    private fun checkBluetoothPermissions() {
+    private fun requestRequiredPermissions() {
+        val permissions = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
-            }
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        permissionLauncher.launch(permissions.toTypedArray())
     }
 
     private fun registerBluetoothReceiver() {
@@ -168,7 +211,7 @@ fun MainScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        // כפתור מעקב ראשי (מאפשר גם שינוי ידני)
+        // כפתור מעקב מצבים
         Button(
             onClick = {
                 val nextState = when (currentState) {
